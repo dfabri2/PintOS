@@ -11,6 +11,7 @@
 #include "threads/switch.h"
 #include "threads/synch.h"
 #include "threads/vaddr.h"
+#include "fixed_point.h"
 #ifdef USERPROG
 #include "userprog/process.h"
 #endif
@@ -24,6 +25,8 @@
 /* List of processes in THREAD_READY state, that is, processes
    that are ready to run but not actually running. */
 static struct list ready_list;
+
+static struct list mlfq[PRI_MAX + 1];  // filas da mlfq
 
 /* List of all processes.  Processes are added to this list
    when they are first scheduled and removed when they exit. */
@@ -60,6 +63,8 @@ static unsigned thread_ticks;   /* # of timer ticks since last yield. */
    Controlled by kernel command-line option "-o mlfqs". */
 bool thread_mlfqs;
 
+static int load_avg;
+
 static void kernel_thread (thread_func *, void *aux);
 
 static void idle (void *aux UNUSED);
@@ -89,6 +94,8 @@ void
 thread_init (void) 
 {
   ASSERT (intr_get_level () == INTR_OFF);
+
+  load_avg = 0;
 
   lock_init (&tid_lock);
   list_init (&ready_list);
@@ -205,6 +212,18 @@ thread_create (const char *name, int priority,
   return tid;
 }
 
+/*funções para aplicação da mlfq*/
+
+void mlfqs_increment_recent_cpu() {
+  if (thread_current() != idle_thread) {
+    int time_int = INT_TO_FP(thread_current()->recent_cpu);
+    time_int++;
+    thread_current()->recent_cpu = FP_TO_INT_ZERO(time_int);
+  }
+}
+
+
+
 /* Puts the current thread to sleep.  It will not be scheduled
    again until awoken by thread_unblock().
 
@@ -238,7 +257,11 @@ thread_unblock (struct thread *t)
 
   old_level = intr_disable ();
   ASSERT (t->status == THREAD_BLOCKED);
-  list_push_back (&ready_list, &t->elem);
+  if (!thread_mlfqs) {
+    list_push_back (&ready_list, &t->elem);
+  } else {
+    // inserir na mlfq
+  }
   t->status = THREAD_READY;
   intr_set_level (old_level);
 }
@@ -308,8 +331,12 @@ thread_yield (void)
   ASSERT (!intr_context ());
 
   old_level = intr_disable ();
-  if (cur != idle_thread) 
-    list_push_back (&ready_list, &cur->elem);
+  if (cur != idle_thread)
+    if (!thread_mlfqs) {
+      list_push_back (&ready_list, &cur->elem);
+    } else {
+      // inserir na mlfq
+    }
   cur->status = THREAD_READY;
   schedule ();
   intr_set_level (old_level);
@@ -464,6 +491,8 @@ init_thread (struct thread *t, const char *name, int priority)
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
   t->magic = THREAD_MAGIC;
+  t->nice = 0;
+  t->recent_cpu = 0;
 
   old_level = intr_disable ();
   list_push_back (&all_list, &t->allelem);
