@@ -92,6 +92,7 @@ struct thread
 
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
+    int64_t sleep_ticks;                /* Tempo dado à thread para ela dormir*/
 
     int nice;                           /*variável para implementação da mlfq*/           
     int recent_cpu;                     /*variável para implementação da mlfq*/   
@@ -140,5 +141,9 @@ int thread_get_nice (void);
 void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
+void thread_check_yield_mlfqs (void);
+void mlfqs_increment_recent_cpu (void);
+void mlfqs_recalculate_priority (struct thread *t);
+void mlfqs_recalculate_load_avg_and_recent_cpu (void);
 
 #endif /* threads/thread.h */

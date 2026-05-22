@@ -31,6 +31,8 @@ static void busy_wait (int64_t loops);
 static void real_time_sleep (int64_t num, int32_t denom);
 static void real_time_delay (int64_t num, int32_t denom);
 
+struct list sleepers;  // criada nova lista para armazenar as threads dorminhocas
+
 /* Sets up the timer to interrupt TIMER_FREQ times per second,
    and registers the corresponding interrupt. */
 void
@@ -38,6 +40,7 @@ timer_init (void)
 {
   pit_configure_channel (0, 2, TIMER_FREQ);
   intr_register_ext (0x20, timer_interrupt, "8254 Timer");
+  list_init(&sleepers);  // inicializa a lista dos dorminhocos
 }
 
 /* Calibrates loops_per_tick, used to implement brief delays. */
@@ -85,16 +88,35 @@ timer_elapsed (int64_t then)
   return timer_ticks () - then;
 }
 
+// função criada para comparar sleep_ticks das threads
+static bool compare_sleep_ticks(const struct list_elem* elem, const struct list_elem* curr, void* aux UNUSED) {  
+  struct thread* to_insert = list_entry(elem, struct thread, elem);
+  struct thread* compared = list_entry(curr, struct thread, elem);
+
+  return to_insert->sleep_ticks < compared->sleep_ticks;
+}
+
 /* Sleeps for approximately TICKS timer ticks.  Interrupts must
    be turned on. */
 void
 timer_sleep (int64_t ticks) 
 {
+  if (ticks <= 0) return;
+
   int64_t start = timer_ticks ();
 
   ASSERT (intr_get_level () == INTR_ON);
-  while (timer_elapsed (start) < ticks) 
-    thread_yield ();
+
+  int64_t wake_up_time = ticks + start;  
+
+  struct thread *cur = thread_current ();   
+  cur->sleep_ticks = wake_up_time;
+  
+  enum intr_level old_level;
+  old_level = intr_disable ();
+  list_insert_ordered(&sleepers, &cur->elem, &compare_sleep_ticks, NULL);
+  thread_block();
+  intr_set_level (old_level);
 }
 
 /* Sleeps for approximately MS milliseconds.  Interrupts must be
@@ -167,6 +189,11 @@ timer_print_stats (void)
   printf ("Timer: %"PRId64" ticks\n", timer_ticks ());
 }
 
+// compara prioridades entre threads
+static bool compare_priority(struct thread* list_thread, struct thread* current_thread) {
+  return list_thread->priority > current_thread->priority;
+}
+
 /* Timer interrupt handler. */
 static void
 timer_interrupt (struct intr_frame *args UNUSED)
@@ -174,6 +201,26 @@ timer_interrupt (struct intr_frame *args UNUSED)
   ticks++;
   thread_tick ();
 
+  /* 1. Lógica da branch alarm_clock: Acordar as threads dorminhocas */
+  while (!list_empty(&sleepers)) {
+    struct list_elem* top = list_front(&sleepers);
+    struct thread* thread_top = list_entry(top, struct thread, elem);
+
+    if (ticks >= thread_top->sleep_ticks) {
+      list_remove(top);
+      thread_unblock(thread_top);
+
+      /* Preempção padrão: só executa se o MLFQS NÃO estiver ativo */
+      if (!thread_mlfqs && compare_priority(thread_top, thread_current())) {
+        intr_yield_on_return();
+      }
+    }
+    else {
+      break; 
+    }
+  }
+
+  /* 2. Lógica da branch mlfq: Atualizar métricas e recalcular prioridades */
   if (thread_mlfqs) {
     mlfqs_increment_recent_cpu(); 
 
@@ -184,6 +231,11 @@ timer_interrupt (struct intr_frame *args UNUSED)
     if (ticks % TIMER_FREQ == 0) {
       mlfqs_recalculate_load_avg_and_recent_cpu();
     }
+
+    /* 3. Preempção do MLFQS: 
+       Verifica se a prioridade da thread atual caiu, ou se a thread que 
+       acabou de ser acordada no bloco do alarm_clock tem prioridade maior. */
+    thread_check_yield_mlfqs(); 
   }
 }
 
@@ -257,3 +309,4 @@ real_time_delay (int64_t num, int32_t denom)
   ASSERT (denom % 1000 == 0);
   busy_wait (loops_per_tick * num / 1000 * TIMER_FREQ / (denom / 1000)); 
 }
+
