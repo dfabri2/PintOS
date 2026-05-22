@@ -101,6 +101,11 @@ thread_init (void)
   list_init (&ready_list);
   list_init (&all_list);
 
+  // inicialização das filas da mlfq
+  for (int i = 0; i <= PRI_MAX; i++) {
+    list_init(&mlfq[i]);
+  }
+
   /* Set up a thread structure for the running thread. */
   initial_thread = running_thread ();
   init_thread (initial_thread, "main", PRI_DEFAULT);
@@ -214,15 +219,79 @@ thread_create (const char *name, int priority,
 
 /*funções para aplicação da mlfq*/
 
-void mlfqs_increment_recent_cpu() {
-  if (thread_current() != idle_thread) {
-    int time_int = INT_TO_FP(thread_current()->recent_cpu);
-    time_int++;
-    thread_current()->recent_cpu = FP_TO_INT_ZERO(time_int);
+/* Incrementa o recent_cpu da thread atual em 1 */
+void mlfqs_increment_recent_cpu(void) {
+  struct thread *cur = thread_current();
+  if (cur != idle_thread) {
+    // Adiciona 1 inteiro ao valor que já está em ponto fixo
+    cur->recent_cpu = ADD_MIX(cur->recent_cpu, 1);
   }
 }
 
+/* Recalcula a prioridade de uma thread específica */
+void mlfqs_recalculate_priority(struct thread* t) {
+  if (t == idle_thread) return;
 
+  // Fórmula: priority = PRI_MAX - (recent_cpu / 4) - (nice * 2)
+  // Divide o recent_cpu por 4 mantendo o ponto fixo, e só então trunca para inteiro
+  int recent_cpu_div_4 = FP_TO_INT_ZERO(DIV_MIX(t->recent_cpu, 4));
+  int new_priority = PRI_MAX - recent_cpu_div_4 - (t->nice * 2);
+
+  // Clamping: A prioridade obrigatoriamente deve ficar entre 0 e 63
+  if (new_priority > PRI_MAX) new_priority = PRI_MAX;
+  if (new_priority < PRI_MIN) new_priority = PRI_MIN;
+
+  t->priority = new_priority;
+}
+
+/* Callback auxiliar usado pelo thread_foreach() para recalcular
+   o recent_cpu e a prioridade de todas as threads vivas do sistema. */
+static void mlfqs_update_recent_cpu(struct thread *t, void *aux UNUSED) {
+  if (t == idle_thread) return;
+
+  int load_avg_2 = MUL_MIX(load_avg, 2);
+  int load_avg_2_plus_1 = ADD_MIX(load_avg_2, 1);
+  int coefficient = DIV_FP(load_avg_2, load_avg_2_plus_1);
+
+  t->recent_cpu = ADD_MIX(MUL_FP(coefficient, t->recent_cpu), t->nice);
+
+  // NOVA ADIÇÃO: Gerenciar a troca de fila
+  int old_priority = t->priority;
+  mlfqs_recalculate_priority(t);
+
+  // Se a thread estiver pronta e a prioridade mudou, move de fila
+  if (t->status == THREAD_READY && t->priority != old_priority) {
+    list_remove(&t->elem);
+    list_push_back(&mlfq[t->priority], &t->elem);
+  }
+}
+
+/* Recalcula a carga do sistema e atualiza todas as threads.
+   Chamada a cada 1 segundo (TIMER_FREQ ticks). */
+void mlfqs_recalculate_load_avg_and_recent_cpu(void) {
+  int ready_threads = 0;
+
+  // Conta a quantidade real de threads na ready_list (todas as filas)
+  for (int i = PRI_MIN; i <= PRI_MAX; i++) {
+    ready_threads += list_size(&mlfq[i]);
+  }
+
+  // A thread em execução também conta como "pronta" na carga do sistema
+  if (thread_current() != idle_thread) {
+    ready_threads++;
+  }
+
+  // Fórmula: avg = (59/60) * avg + (1/60) * ready_threads
+  // Truque: Multiplicar primeiro pelo inteiro e depois dividir evita perdas de precisão antes da divisão
+  int term1 = DIV_MIX(MUL_MIX(load_avg, 59), 60);
+  int term2 = DIV_MIX(INT_TO_FP(ready_threads), 60);
+  
+  load_avg = ADD_FP(term1, term2);
+
+  // O recent_cpu (e a nova prioridade) devem ser calculados para TODAS as threads
+  // do sistema (prontas, bloqueadas e rodando). O thread_foreach varre a all_list.
+  thread_foreach(mlfqs_update_recent_cpu, NULL);
+}
 
 /* Puts the current thread to sleep.  It will not be scheduled
    again until awoken by thread_unblock().
@@ -260,7 +329,7 @@ thread_unblock (struct thread *t)
   if (!thread_mlfqs) {
     list_push_back (&ready_list, &t->elem);
   } else {
-    // inserir na mlfq
+    list_push_back (&mlfq[t->priority], &t->elem);
   }
   t->status = THREAD_READY;
   intr_set_level (old_level);
@@ -335,7 +404,7 @@ thread_yield (void)
     if (!thread_mlfqs) {
       list_push_back (&ready_list, &cur->elem);
     } else {
-      // inserir na mlfq
+      list_push_back (&mlfq[cur->priority], &cur->elem);
     }
   cur->status = THREAD_READY;
   schedule ();
@@ -363,6 +432,7 @@ thread_foreach (thread_action_func *func, void *aux)
 void
 thread_set_priority (int new_priority) 
 {
+  if (thread_mlfqs) return; // Ignora se o MLFQS estiver ativo
   thread_current ()->priority = new_priority;
 }
 
@@ -377,33 +447,32 @@ thread_get_priority (void)
 void
 thread_set_nice (int nice UNUSED) 
 {
-  /* Not yet implemented. */
+  thread_current()->nice = nice;
+  mlfqs_recalculate_priority(thread_current());
+  thread_yield(); // O yield é necessário pois a nova prioridade pode ser menor
 }
 
 /* Returns the current thread's nice value. */
 int
 thread_get_nice (void) 
 {
-  /* Not yet implemented. */
-  return 0;
+  return thread_current()->nice;
 }
 
 /* Returns 100 times the system load average. */
 int
 thread_get_load_avg (void) 
 {
-  /* Not yet implemented. */
-  return 0;
+  return FP_TO_INT_NEAR(MUL_MIX(load_avg, 100));
 }
 
 /* Returns 100 times the current thread's recent_cpu value. */
 int
 thread_get_recent_cpu (void) 
 {
-  /* Not yet implemented. */
-  return 0;
+  return FP_TO_INT_NEAR(MUL_MIX(thread_current()->recent_cpu, 100));
 }
-
+
 /* Idle thread.  Executes when no other thread is ready to run.
 
    The idle thread is initially put on the ready list by
@@ -491,8 +560,13 @@ init_thread (struct thread *t, const char *name, int priority)
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
   t->magic = THREAD_MAGIC;
-  t->nice = 0;
-  t->recent_cpu = 0;
+  if (t == initial_thread) {
+    t->nice = 0;
+    t->recent_cpu = 0;
+  } else {
+    t->nice = thread_current()->nice;
+    t->recent_cpu = thread_current()->recent_cpu;
+  }
 
   old_level = intr_disable ();
   list_push_back (&all_list, &t->allelem);
@@ -520,10 +594,19 @@ alloc_frame (struct thread *t, size_t size)
 static struct thread *
 next_thread_to_run (void) 
 {
-  if (list_empty (&ready_list))
+  if (!thread_mlfqs) {
+    if (list_empty (&ready_list))
     return idle_thread;
   else
     return list_entry (list_pop_front (&ready_list), struct thread, elem);
+  } else {
+    for (int i = PRI_MAX; i >= PRI_MIN; i--) {
+      if (!list_empty(&mlfq[i])) {
+        return list_entry(list_pop_front(&mlfq[i]), struct thread, elem);
+      }
+    }
+    return idle_thread;
+  }
 }
 
 /* Completes a thread switch by activating the new thread's page
@@ -613,7 +696,7 @@ allocate_tid (void)
 
   return tid;
 }
-
+
 /* Offset of `stack' member within `struct thread'.
    Used by switch.S, which can't figure it out on its own. */
 uint32_t thread_stack_ofs = offsetof (struct thread, stack);
