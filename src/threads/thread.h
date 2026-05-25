@@ -92,10 +92,10 @@ struct thread
 
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
-    int64_t sleep_ticks;                /* Tempo dado à thread para ela dormir*/
+    int64_t sleep_ticks;                /* tempo dado à thread para ela dormir. */
 
-    int nice;                           /*variável para implementação da mlfq*/           
-    int recent_cpu;                     /*variável para implementação da mlfq*/   
+    int nice;                           /* variável para implementação da mlfq. */           
+    int recent_cpu;                     /* variável para implementação da mlfq. */   
 
 #ifdef USERPROG
     /* Owned by userprog/process.c. */

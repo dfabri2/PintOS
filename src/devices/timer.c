@@ -107,13 +107,16 @@ timer_sleep (int64_t ticks)
 
   ASSERT (intr_get_level () == INTR_ON);
 
+  // armazena em que tick a thread deve acordar
   int64_t wake_up_time = ticks + start;  
 
   struct thread *cur = thread_current ();   
+  // assimila o valor à variável da struct
   cur->sleep_ticks = wake_up_time;
   
   enum intr_level old_level;
   old_level = intr_disable ();
+  // insere a thread na lista de dorminhocos na posição correta
   list_insert_ordered(&sleepers, &cur->elem, &compare_sleep_ticks, NULL);
   thread_block();
   intr_set_level (old_level);
@@ -201,16 +204,20 @@ timer_interrupt (struct intr_frame *args UNUSED)
   ticks++;
   thread_tick ();
 
-  /* 1. Lógica da branch alarm_clock: Acordar as threads dorminhocas */
+  /* acorda as threads dorminhocas por meio de um while
+     a fim de permitir que mais de uma thread seja acordada
+     em um determinado tick                                 */ 
   while (!list_empty(&sleepers)) {
+    // puxa a thread mais próxima de acordar
     struct list_elem* top = list_front(&sleepers);
     struct thread* thread_top = list_entry(top, struct thread, elem);
-
+    
+    // verifica se ela já passou do tempo dado de sleep
     if (ticks >= thread_top->sleep_ticks) {
       list_remove(top);
       thread_unblock(thread_top);
 
-      /* Preempção padrão: só executa se o MLFQS NÃO estiver ativo */
+      // analiza se a thread acordada possui prioridade maior que a thread executada
       if (!thread_mlfqs && compare_priority(thread_top, thread_current())) {
         intr_yield_on_return();
       }
@@ -220,7 +227,7 @@ timer_interrupt (struct intr_frame *args UNUSED)
     }
   }
 
-  /* 2. Lógica da branch mlfq: Atualizar métricas e recalcular prioridades */
+  // atualização de métricas e prioridades
   if (thread_mlfqs) {
     mlfqs_increment_recent_cpu(); 
 
@@ -232,9 +239,7 @@ timer_interrupt (struct intr_frame *args UNUSED)
       mlfqs_recalculate_load_avg_and_recent_cpu();
     }
 
-    /* 3. Preempção do MLFQS: 
-       Verifica se a prioridade da thread atual caiu, ou se a thread que 
-       acabou de ser acordada no bloco do alarm_clock tem prioridade maior. */
+    // verifica nas filas da mlfq se existe alguma thread com prioridade superior à atual
     thread_check_yield_mlfqs(); 
   }
 }
